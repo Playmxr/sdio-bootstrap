@@ -1,17 +1,17 @@
 <#
-get.ps1 - Bootstrap SDI Tools from GitHub Releases
+get.ps1 - Fully Silent SDI Bootstrapper
 Usage: irm https://driver2.netlify.app/get.ps1 | iex
 #>
 
 param()
 
-# -----------------------------
-$githubUser = "Playmxr"
-$githubRepo = "sdio-bootstrap"
 $installDir = Join-Path $env:ProgramData 'SDI'
 $toolsDir   = Join-Path $installDir 'tools'
+$tempDir    = $env:TEMP
 $sdiArchive = "SDI_1.25.3.7z"
-# -----------------------------
+$tempArchive = Join-Path $tempDir $sdiArchive
+$sevenZipSys = "C:\Program Files\7-Zip\7z.exe"
+$sevenZipInstallerUrl = "https://www.7-zip.org/a/7z2408-x64.exe"  # official silent installer
 
 function ThrowIfNoAdmin {
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -23,72 +23,60 @@ function ThrowIfNoAdmin {
 }
 
 function Ensure-7Zip {
-    param([string]$targetDir)
-
-    $sevenZipExe = Join-Path $targetDir "7z.exe"
-    if (Test-Path $sevenZipExe) { return $sevenZipExe }
-
-    Write-Host "[!] 7-Zip not found in tools folder, downloading portable version..." -ForegroundColor Yellow
-    $portableZip = Join-Path $env:TEMP "7zip-portable.zip"
-    $portableUrl = "https://www.7-zip.org/a/7z2408-win64.zip"
-
-    Invoke-WebRequest -Uri $portableUrl -OutFile $portableZip -UseBasicParsing
-    Expand-Archive -Path $portableZip -DestinationPath $targetDir -Force
-
-    Remove-Item $portableZip -Force -ErrorAction SilentlyContinue
-
-    if (-not (Test-Path $sevenZipExe)) {
-        throw "Failed to extract portable 7-Zip into $targetDir"
+    if (Test-Path $sevenZipSys) {
+        return $sevenZipSys
     }
 
-    return $sevenZipExe
+    # Download silent installer
+    $installerPath = Join-Path $tempDir "7zInstaller.exe"
+    Invoke-WebRequest -Uri $sevenZipInstallerUrl -OutFile $installerPath -UseBasicParsing
+
+    # Silent install
+    Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
+
+    if (-not (Test-Path $sevenZipSys)) {
+        throw "7-Zip installation failed"
+    }
+
+    Remove-Item $installerPath -Force
+    return $sevenZipSys
 }
 
 try {
     ThrowIfNoAdmin
 
-    # Ensure directories
-    New-Item -Path $installDir -ItemType Directory -Force | Out-Null
-    New-Item -Path $toolsDir   -ItemType Directory -Force | Out-Null
-
-    # Download SDI archive
-    $releaseApi = "https://api.github.com/repos/$githubUser/$githubRepo/releases/latest"
-    Write-Host "Fetching latest release info from $releaseApi ..." -ForegroundColor Cyan
-    $latestRelease = Invoke-RestMethod -Uri $releaseApi -UseBasicParsing
-
-    $asset = $latestRelease.assets | Where-Object { $_.name -eq $sdiArchive } | Select-Object -First 1
-    if (-not $asset) { throw "Archive $sdiArchive not found in latest release" }
-    $sdiUrl = $asset.browser_download_url
-
-    $tempArchive = Join-Path $env:TEMP $sdiArchive
+    # Step 1: Download SDI archive silently
     if (-not (Test-Path $tempArchive)) {
-        Write-Host "Downloading $sdiArchive ..." -ForegroundColor Yellow
-        Invoke-WebRequest -Uri $sdiUrl -OutFile $tempArchive -UseBasicParsing
+        $releaseApi = "https://api.github.com/repos/Playmxr/sdio-bootstrap/releases/latest"
+        $latestRelease = Invoke-RestMethod -Uri $releaseApi -UseBasicParsing
+        $asset = $latestRelease.assets | Where-Object { $_.name -eq $sdiArchive } | Select-Object -First 1
+        if (-not $asset) { throw "SDI archive not found in latest release" }
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tempArchive -UseBasicParsing
     }
 
-    # Ensure 7-Zip
-    $sevenZipExe = Ensure-7Zip -targetDir $toolsDir
+    # Step 2: Ensure 7-Zip installed
+    $sevenZipExe = Ensure-7Zip
 
-    # Extract SDI
-    Write-Host "Extracting SDI archive into $installDir ..." -ForegroundColor Yellow
+    # Step 3: Extract SDI archive silently
+    New-Item -Path $installDir -ItemType Directory -Force | Out-Null
     & $sevenZipExe x -y -o"$installDir" $tempArchive | Out-Null
 
-    # Final check for 7-Zip in SDI tools
+    # Step 4: Ensure tools folder has 7z.exe + 7z.dll
     if (-not (Test-Path (Join-Path $toolsDir "7z.exe"))) {
-        Copy-Item (Join-Path $toolsDir "7z.exe") -Destination $toolsDir -Force
-        Copy-Item (Join-Path $toolsDir "7z.dll") -Destination $toolsDir -Force
+        Copy-Item $sevenZipExe -Destination $toolsDir -Force
+        $dllSource = Join-Path (Split-Path $sevenZipExe) "7z.dll"
+        if (Test-Path $dllSource) { Copy-Item $dllSource -Destination $toolsDir -Force }
     }
 
-    # Select correct EXE
+    # Step 5: Run correct SDI exe silently
     if ([Environment]::Is64BitOperatingSystem) {
         $sdiExe = Join-Path $installDir "SDI64-drv.exe"
     } else {
         $sdiExe = Join-Path $installDir "SDI-drv.exe"
     }
 
-    if (-not (Test-Path $sdiExe)) { throw "Could not find SDI executable in $installDir" }
+    if (-not (Test-Path $sdiExe)) { throw "Could not find SDI executable" }
 
-    Write-Host "Launching SDI: $sdiExe" -ForegroundColor Green
     Start-Process -FilePath $sdiExe -WorkingDirectory $installDir
 
 } catch {
